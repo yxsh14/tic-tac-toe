@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "noEmitOnError": true,
+    "outDir": "./build",
+    "rootDir": "./modules",
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": [
+    "modules/**/*.ts",
+    "types/**/*.d.ts"
+  ]
+}
