@@ -5,10 +5,10 @@ import {
   MOVE_TIMEOUT_MS,
   RECONNECT_TIMEOUT_MS,
   SYMBOLS,
-} from "../core/constants";
-import { MovePayload, OPCODES } from "../core/protocol";
-import { MatchState, Player } from "../core/types";
-import { checkWinner, isBoardFull } from "../core/utils";
+} from "../shared/constants";
+import { MovePayload, OPCODES } from "../shared/protocol";
+import { MatchState, Player } from "../shared/types";
+import { checkWinner, isBoardFull } from "../shared/utils";
 
 const createInitialState = (): MatchState => ({
   players: [],
@@ -370,3 +370,103 @@ export const ticTacToeMatchHandler: nkruntime.MatchHandler<MatchState> = {
     return { state, data };
   },
 };
+
+// Named wrappers for Nakama JS runtime compatibility.
+export function matchInit(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  params: { [key: string]: string }
+) {
+  return ticTacToeMatchHandler.matchInit(ctx, logger, nk, params);
+}
+
+export function matchJoinAttempt(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  presence: nkruntime.Presence,
+  metadata: { [key: string]: string }
+) {
+  return ticTacToeMatchHandler.matchJoinAttempt(
+    ctx,
+    logger,
+    nk,
+    dispatcher,
+    tick,
+    state,
+    presence,
+    metadata
+  );
+}
+
+export function matchJoin(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  presences: nkruntime.Presence[]
+) {
+  return ticTacToeMatchHandler.matchJoin(ctx, logger, nk, dispatcher, tick, state, presences);
+}
+
+export function matchLeave(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  presences: nkruntime.Presence[]
+) {
+  return ticTacToeMatchHandler.matchLeave(ctx, logger, nk, dispatcher, tick, state, presences);
+}
+
+export function matchLoop(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  messages: nkruntime.MatchMessage[]
+) {
+  return ticTacToeMatchHandler.matchLoop(ctx, logger, nk, dispatcher, tick, state, messages);
+}
+
+export function matchTerminate(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  graceSeconds: number
+) {
+  return ticTacToeMatchHandler.matchTerminate(
+    ctx,
+    logger,
+    nk,
+    dispatcher,
+    tick,
+    state,
+    graceSeconds
+  );
+}
+
+export function matchSignal(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState,
+  data: string
+) {
+  return ticTacToeMatchHandler.matchSignal(ctx, logger, nk, dispatcher, tick, state, data);
+}

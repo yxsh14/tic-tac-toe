@@ -1,17 +1,17 @@
 {
   "compilerOptions": {
-    "target": "ES2019",
-    "module": "commonjs",
-    "moduleResolution": "node",
+    "target": "ES5",
+    "module": "none",
     "strict": true,
     "noEmitOnError": true,
-    "outDir": "./build",
-    "rootDir": "./modules",
+    "outFile": "./build/index.js",
+    "removeComments": false,
+    "noEmitHelpers": true,
     "skipLibCheck": true,
     "types": []
   },
-  "include": [
-    "modules/**/*.ts",
-    "types/**/*.d.ts"
+  "files": [
+    "types/nakama-runtime.d.ts",
+    "modules/runtime.ts"
   ]
 }

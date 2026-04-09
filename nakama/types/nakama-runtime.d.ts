@@ -29,6 +29,14 @@ declare namespace nkruntime {
     matchId: string;
   }
 
+  interface UserRecord {
+    username?: string;
+  }
+
+  interface Account {
+    user?: UserRecord;
+  }
+
   interface MatchDispatcher {
     broadcastMessage(
       opCode: number,
@@ -43,6 +51,7 @@ declare namespace nkruntime {
     binaryToString(data: string): string;
     matchCreate(module: string, params: Record<string, unknown>): string;
     matchGet(matchId: string): Match | null;
+    accountGetId(userId: string): Account;
     matchList(
       limit: number,
       authoritative: boolean,

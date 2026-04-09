@@ -1,4 +1,4 @@
-export const createMatchRpc: nkruntime.RpcFunction = (
+export const createMatch: nkruntime.RpcFunction = (
   _ctx,
   _logger,
   nk,
@@ -8,7 +8,9 @@ export const createMatchRpc: nkruntime.RpcFunction = (
 
   return JSON.stringify({
     ok: true,
-    matchId,
-    message: "match created",
+    data: {
+      matchId,
+    },
+    error: null,
   });
 };

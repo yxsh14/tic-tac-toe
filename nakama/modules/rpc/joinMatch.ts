@@ -1,8 +1,10 @@
+import { MAX_PLAYERS } from "../shared/constants";
+
 interface JoinMatchPayload {
   matchId?: string;
 }
 
-export const joinMatchRpc: nkruntime.RpcFunction = (
+export const joinMatch: nkruntime.RpcFunction = (
   _ctx,
   _logger,
   nk,
@@ -14,7 +16,11 @@ export const joinMatchRpc: nkruntime.RpcFunction = (
     try {
       request = JSON.parse(payload) as JoinMatchPayload;
     } catch {
-      throw new Error("Invalid payload JSON");
+      return JSON.stringify({
+        ok: false,
+        data: null,
+        error: "invalid payload json",
+      });
     }
   }
 
@@ -22,22 +28,35 @@ export const joinMatchRpc: nkruntime.RpcFunction = (
   if (!matchId) {
     return JSON.stringify({
       ok: false,
+      data: null,
       error: "matchId is required",
     });
   }
 
-  const matches = nk.matchList(100, true, "", 0, 2, "");
-  const exists = matches.some((match) => match.matchId === matchId);
-  if (!exists) {
+  const matches = nk.matchList(100, true, "", 0, MAX_PLAYERS, "");
+  const targetMatch = matches.find((match) => match.matchId === matchId);
+  if (!targetMatch) {
     return JSON.stringify({
       ok: false,
+      data: null,
       error: "match not found",
+    });
+  }
+
+  const size = (targetMatch as { size?: number }).size;
+  if (typeof size === "number" && size >= MAX_PLAYERS) {
+    return JSON.stringify({
+      ok: false,
+      data: null,
+      error: "match is full",
     });
   }
 
   return JSON.stringify({
     ok: true,
-    matchId,
-    message: "match exists",
+    data: {
+      matchId,
+    },
+    error: null,
   });
 };
