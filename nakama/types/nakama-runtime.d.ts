@@ -106,7 +106,7 @@ declare namespace nkruntime {
       username: string,
       score: number,
       subscore: number,
-      metadata: Record<string, unknown>
+      metadata: Record<string, string>
     ): void;
     leaderboardRecordsList(
       id: string,

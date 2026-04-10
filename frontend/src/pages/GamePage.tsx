@@ -115,12 +115,12 @@ const GamePage = () => {
             // Check if this was a clean close or error
             const wasClean = (evt as CloseEvent)?.wasClean ?? false;
             if (!wasClean) {
-              setConnectionError("Connection lost. Returning to home...");
-              // Auto-return to home after brief delay
+              setConnectionError("Connection lost. Returning to lobby...");
+              // Auto-return to lobby after brief delay
               setTimeout(() => {
                 resetMatchSocket();
                 clearSession();
-                navigate(ROUTES.HOME, { replace: true });
+                navigate(ROUTES.LOBBY, { replace: true });
               }, 2000);
             } else {
               setConnectionError("Socket disconnected");
@@ -132,11 +132,11 @@ const GamePage = () => {
         setConnectionStatus("error");
         const errorMsg = e instanceof Error ? e.message : "Failed to connect match socket";
         setConnectionError(errorMsg);
-        // On connection failure, hard reset and go home
+        // On connection failure, hard reset and go to lobby
         resetMatchSocket();
         clearSession();
         setTimeout(() => {
-          navigate(ROUTES.HOME, { replace: true });
+          navigate(ROUTES.LOBBY, { replace: true });
         }, 2000);
       }
     };

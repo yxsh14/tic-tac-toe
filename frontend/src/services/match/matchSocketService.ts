@@ -30,7 +30,6 @@ export function resetMatchSocket(): void {
     joinedMatchId = null;
     activeHandlers = {};
     lastMatchDataLogAt = 0;
-    console.log("[socket] hard reset complete");
   }
 }
 
@@ -46,12 +45,10 @@ function attachSafeHandlers(socket: Socket): void {
     try {
       const now = Date.now();
       if (now - lastMatchDataLogAt >= 2000) {
-        console.log("[socket] match data stream active", { opCode: data.op_code });
         lastMatchDataLogAt = now;
       }
       activeHandlers.onMatchData?.(data);
     } catch (error) {
-      console.error("[socket] onmatchdata handler crashed", error);
     }
   };
 
@@ -59,10 +56,8 @@ function attachSafeHandlers(socket: Socket): void {
     try {
       isConnected = false;
       joinedMatchId = null;
-      console.log("[socket] disconnected");
       activeHandlers.onDisconnect?.(evt);
     } catch (error) {
-      console.error("[socket] ondisconnect handler crashed", error);
     }
   };
 }
@@ -80,14 +75,11 @@ export async function connectAuthoritativeMatch(
   attachSafeHandlers(socket);
 
   if (!isConnected) {
-    console.log("[socket] connecting");
     await socket.connect(session, false);
     isConnected = true;
-    console.log("[socket] connected");
   }
 
   if (joinedMatchId && joinedMatchId !== matchId) {
-    console.log("[socket] leaving previous match before join", { previous: joinedMatchId, next: matchId });
     try {
       await singletonSocket.leaveMatch(joinedMatchId);
     } catch (e) {
@@ -97,14 +89,11 @@ export async function connectAuthoritativeMatch(
   }
 
   if (joinedMatchId !== matchId) {
-    console.log("[socket] joining match", { matchId });
     await socket.joinMatch(matchId, undefined, {});
     joinedMatchId = matchId;
-    console.log("[socket] joined match", { matchId });
   }
 
   const disconnect = () => {
-    console.log("[socket] disconnect requested");
     resetMatchSocket();
   };
 

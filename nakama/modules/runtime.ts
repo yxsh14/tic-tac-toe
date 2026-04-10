@@ -57,7 +57,9 @@ const RPC_MATCHMAKER = "matchmaker";
 const RPC_GET_PROFILE = "get_profile";
 
 const STORAGE_COLLECTION_ROOMS = "tic_tac_toe_room";
+const STORAGE_COLLECTION_ROOM_CODES = "tic_tac_toe_room_codes";
 const STORAGE_PLAYER_STATS = "player_stats";
+const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const STATS_KEY = "summary";
 const LEADERBOARD_ID = "tic_tac_toe_elo";
 const DEFAULT_RATING = 1200;
@@ -184,6 +186,7 @@ function updateStats(
   logger: nkruntime.Logger
 ): void {
   try {
+    // Write player stats to storage
     nk.storageWrite([
       {
         collection: STORAGE_PLAYER_STATS,
@@ -195,7 +198,15 @@ function updateStats(
         version: "",
       },
     ]);
-    nk.leaderboardRecordWrite(LEADERBOARD_ID, userId, username || "player", stats.rating, 0, {});
+    
+    // Write to leaderboard - metadata values must be strings
+    const metadata: Record<string, string> = {
+      rating: String(stats.rating),
+      wins: String(stats.wins),
+      losses: String(stats.losses),
+      draws: String(stats.draws),
+    };
+    nk.leaderboardRecordWrite(LEADERBOARD_ID, userId, username || "player", stats.rating, 0, metadata);
   } catch (e) {
     logger.error("updateStats failed for %s: %s", userId, String(e));
     throw e;
@@ -295,23 +306,28 @@ function normalizeRoomCode(raw: string): string {
 }
 
 function roomAlreadyUsed(nk: nkruntime.Nakama, roomCode: string): boolean {
-  // CRITICAL FIX: Check if there's an ACTIVE match with this room code
-  // Finished/terminated matches should not block room code reuse
-  const matches = nk.matchList(10, true, roomCode, 0, MAX_PLAYERS + 1, "");
-  for (let i = 0; i < matches.length; i += 1) {
-    const m = matches[i] as { matchId?: string; label?: string };
-    if (!m.label) continue;
-    try {
-      const parsed = JSON.parse(m.label) as { status?: string };
-      // Only count as "used" if match is NOT finished
-      if (parsed.status !== "finished") {
-        return true;
+  // PRIMARY: Check storage-based tracking for active room codes
+  // This is the authoritative source for room code availability
+  try {
+    const activeCodes = nk.storageRead([
+      { collection: STORAGE_COLLECTION_ROOM_CODES, key: roomCode, userId: SYSTEM_USER_ID },
+    ]);
+    if (activeCodes && activeCodes.length > 0 && activeCodes[0].value) {
+      try {
+        const parsed = JSON.parse(activeCodes[0].value);
+        // If we have a matchId in storage, the code is active
+        if (parsed && parsed.matchId) {
+          return true;
+        }
+      } catch {
+        // If can't parse, assume it's stale - safe to reuse
       }
-    } catch {
-      // If can't parse label, assume it's an old format match - count as used to be safe
-      return true;
     }
+  } catch {
+    // Storage read failed - log but continue to be resilient
   }
+  
+  // Storage shows code is available, safe to use
   return false;
 }
 
@@ -322,12 +338,36 @@ function persistRoomMapping(
   matchId: string
 ): void {
   if (!ctx.userId) return;
+  
+  const roomData = {
+    matchId: matchId,
+    roomCode: roomCode,
+    createdAt: Date.now(),
+    createdBy: ctx.userId,
+    status: "active"
+  };
+  
+  // Write room mapping under creator's userId (for room lookup by user)
   nk.storageWrite([
     {
       collection: STORAGE_COLLECTION_ROOMS,
       key: roomCode,
       userId: ctx.userId,
-      value: JSON.stringify({ matchId: matchId, roomCode: roomCode, createdAt: Date.now() }),
+      value: JSON.stringify(roomData),
+      permissionRead: 2,
+      permissionWrite: 0,
+      version: "",
+    },
+  ]);
+  
+  // Write to system tracking collection (for room code uniqueness check)
+  // Use empty version "" for upsert behavior
+  nk.storageWrite([
+    {
+      collection: STORAGE_COLLECTION_ROOM_CODES,
+      key: roomCode,
+      userId: SYSTEM_USER_ID,
+      value: JSON.stringify({ matchId: matchId, createdAt: Date.now() }),
       permissionRead: 2,
       permissionWrite: 0,
       version: "",
@@ -335,21 +375,59 @@ function persistRoomMapping(
   ]);
 }
 
+function terminateMatch(
+  state: MatchState,
+  logger: nkruntime.Logger
+): void {
+  const meta = (state as unknown as Record<string, unknown>)._meta as
+    | { roomCode: string; mode: GameMode; isInvite: boolean }
+    | undefined;
+  if (meta && meta.roomCode) {
+    logger.info("Match ending, room code %s will be freed", meta.roomCode);
+  }
+  state.status = "finished";
+  state.moveDeadline = null;
+  state.reconnectDeadline = null;
+}
+
+function releaseRoomCodeFromStorage(nk: nkruntime.Nakama, roomCode: string, logger: nkruntime.Logger): void {
+  try {
+    nk.storageWrite([
+      {
+        collection: STORAGE_COLLECTION_ROOM_CODES,
+        key: roomCode,
+        userId: SYSTEM_USER_ID,
+        value: JSON.stringify({ matchId: null, releasedAt: Date.now() }),
+        permissionRead: 2,
+        permissionWrite: 0,
+        version: "",
+      },
+    ]);
+    logger.info("Room code %s released from storage", roomCode);
+  } catch (e) {
+    logger.error("Failed to release room code %s: %s", roomCode, String(e));
+  }
+}
+
 function findMatchIdByRoomCode(nk: nkruntime.Nakama, roomCode: string): string | null {
-  const matches = nk.matchList(10, true, roomCode, 0, MAX_PLAYERS + 1, "");
-  for (let i = 0; i < matches.length; i += 1) {
-    const m = matches[i] as { matchId?: string; label?: string };
-    if (!m.matchId) continue;
-    // Skip finished matches
-    if (m.label) {
+  // PRIMARY: Check storage for active room code mapping
+  // This is the authoritative source
+  try {
+    const activeCodes = nk.storageRead([
+      { collection: STORAGE_COLLECTION_ROOM_CODES, key: roomCode, userId: SYSTEM_USER_ID },
+    ]);
+    if (activeCodes && activeCodes.length > 0 && activeCodes[0].value) {
       try {
-        const parsed = JSON.parse(m.label) as { status?: string };
-        if (parsed.status === "finished") continue;
+        const parsed = JSON.parse(activeCodes[0].value);
+        if (parsed && parsed.matchId) {
+          return parsed.matchId;
+        }
       } catch {
-        // If can't parse, assume active to be safe
+        // Storage parse failed
       }
     }
-    return m.matchId;
+  } catch {
+    // Storage read failed
   }
   return null;
 }
@@ -460,11 +538,40 @@ function buildMatchLabel(state: MatchState, roomCode: string, mode: GameMode, is
     roomCode: roomCode,
     mode: mode,
     isInvite: isInvite,
-    // REFINED: Only matches with exactly 1 connected player are open for joining
-    // This prevents reuse of abandoned matches (0 players) or full matches (2 players)
     isOpen: state.status === "waiting" && connected === 1,
   };
   return JSON.stringify(payload);
+}
+
+function buildQuickPlayLabel(state: MatchState, roomCode: string, mode: GameMode): string {
+  const connected = countConnectedPlayers(state);
+  const payload = {
+    status: state.status,
+    connectedPlayers: connected,
+    roomCode: roomCode,
+    mode: mode,
+    isInvite: false,
+    isQuickPlay: true,
+    isOpen: state.status === "waiting" && connected === 1,
+  };
+  return JSON.stringify(payload);
+}
+
+interface MatchMeta {
+  roomCode: string;
+  mode: GameMode;
+  isInvite: boolean;
+  isQuickPlay: boolean;
+}
+
+function buildLabelFromMeta(state: MatchState, meta: MatchMeta | undefined): string {
+  if (!meta) {
+    return JSON.stringify({ status: state.status, connectedPlayers: countConnectedPlayers(state) });
+  }
+  if (meta.isQuickPlay) {
+    return buildQuickPlayLabel(state, meta.roomCode, meta.mode);
+  }
+  return buildMatchLabel(state, meta.roomCode, meta.mode, meta.isInvite);
 }
 
 function syncStateAfterPresenceChange(state: MatchState): void {
@@ -513,18 +620,14 @@ function applyReconnectTimeout(state: MatchState, logger: nkruntime.Logger): voi
     const p = state.players[i];
     if (!p.isConnected) {
       state.winner = opponentSymbol(p.symbol);
-      state.status = "finished";
-      state.moveDeadline = null;
-      state.reconnectDeadline = null;
+      terminateMatch(state, logger);
       logger.info("Reconnect timeout, winner=%s", state.winner);
       return;
     }
   }
 
-  state.status = "finished";
   state.winner = null;
-  state.moveDeadline = null;
-  state.reconnectDeadline = null;
+  terminateMatch(state, logger);
   logger.info("Reconnect timeout draw");
 }
 
@@ -535,9 +638,7 @@ function applyMoveTimeout(state: MatchState, logger: nkruntime.Logger): void {
   if (nowMs() <= state.moveDeadline) return;
 
   state.winner = opponentSymbol(state.currentTurn);
-  state.status = "finished";
-  state.moveDeadline = null;
-  state.reconnectDeadline = null;
+  terminateMatch(state, logger);
   logger.info("Move timeout, winner=%s", state.winner);
 }
 
@@ -550,6 +651,7 @@ function matchInit(
   const roomCode = params.roomCode ? params.roomCode : "";
   const mode = parseGameMode(params.mode);
   const isInvite = params.invite === "1";
+  const isQuickPlay = params.isQuickPlay === "1";
   const st = createInitialState();
   st.gameMode = mode;
   st.moveTimeoutMs = parseMoveTimeoutMsParam(params.moveTimeoutMs);
@@ -559,9 +661,18 @@ function matchInit(
     roomCode: roomCode,
     mode: mode,
     isInvite: isInvite,
+    isQuickPlay: isQuickPlay,
   };
   stAny._createdAt = nowMs(); // For idle timeout tracking
-  const label = buildMatchLabel(st, roomCode, mode, isInvite);
+  
+  // Use appropriate label based on match type
+  let label: string;
+  if (isQuickPlay) {
+    label = buildQuickPlayLabel(st, roomCode, mode);
+  } else {
+    label = buildMatchLabel(st, roomCode, mode, isInvite);
+  }
+  
   return {
     state: st,
     tickRate: 10,
@@ -643,13 +754,8 @@ function matchJoin(
   refreshPublicPlayerStats(state, nk);
   dispatcher.broadcastMessage(OP_CODE_STATE, toStatePayload(state));
 
-  // Update label with new state
-  const meta = (state as unknown as Record<string, unknown>)._meta as
-    | { roomCode: string; mode: GameMode; isInvite: boolean }
-    | undefined;
-  const label = meta
-    ? buildMatchLabel(state, meta.roomCode, meta.mode, meta.isInvite)
-    : JSON.stringify({ status: state.status, connectedPlayers: countConnectedPlayers(state) });
+  const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
+  const label = buildLabelFromMeta(state, meta);
 
   return { state: state, label: label };
 }
@@ -676,14 +782,12 @@ function matchLeave(
   // CRITICAL: Auto-cleanup empty waiting matches
   if (state.status === "waiting" && connectedPlayers === 0 && state.movesCount === 0) {
     logger.info("Auto-terminating empty waiting match");
-    state.status = "finished";
-    // Build updated label to signal match is closed
-    const meta = (state as unknown as Record<string, unknown>)._meta as
-      | { roomCode: string; mode: GameMode; isInvite: boolean }
-      | undefined;
-    const label = meta
-      ? buildMatchLabel(state, meta.roomCode, meta.mode, meta.isInvite)
-      : JSON.stringify({ status: "finished", connectedPlayers: 0 });
+    const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
+    if (meta && meta.roomCode) {
+      releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
+    }
+    terminateMatch(state, logger);
+    const label = buildLabelFromMeta(state, meta);
     return { state: state, label: label };
   }
 
@@ -715,13 +819,8 @@ function matchLeave(
   refreshPublicPlayerStats(state, nk);
   dispatcher.broadcastMessage(OP_CODE_STATE, toStatePayload(state));
 
-  // Update label with new state
-  const meta = (state as unknown as Record<string, unknown>)._meta as
-    | { roomCode: string; mode: GameMode; isInvite: boolean }
-    | undefined;
-  const label = meta
-    ? buildMatchLabel(state, meta.roomCode, meta.mode, meta.isInvite)
-    : JSON.stringify({ status: state.status, connectedPlayers: countConnectedPlayers(state) });
+  const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
+  const label = buildLabelFromMeta(state, meta);
 
   return { state: state, label: label };
 }
@@ -739,10 +838,6 @@ function applyWaitingIdleTimeout(state: MatchState, logger: nkruntime.Logger): v
   // Check if we've been waiting too long with 1 player
   if (connected === 1 && state.players.length === 1) {
     const now = nowMs();
-    const playerJoinedAt = state.disconnectAt[state.players[0].userId];
-    // Use player join time or current time - 5 min as threshold
-    const threshold = now - WAITING_IDLE_TIMEOUT_MS;
-    // Simple heuristic: if no activity and single player for 5+ min, close it
     // Store join time in state if not present
     const stateAny = state as unknown as Record<string, unknown>;
     if (!stateAny._createdAt) {
@@ -751,9 +846,7 @@ function applyWaitingIdleTimeout(state: MatchState, logger: nkruntime.Logger): v
     const createdAt = stateAny._createdAt as number;
     if (now - createdAt > WAITING_IDLE_TIMEOUT_MS) {
       logger.info("Auto-closing idle waiting match (created %s ms ago)", now - createdAt);
-      state.status = "finished";
-      state.moveDeadline = null;
-      state.reconnectDeadline = null;
+      terminateMatch(state, logger);
     }
   }
 }
@@ -799,17 +892,25 @@ function matchLoop(
     const winner = checkWinner(state.board);
     if (winner) {
       state.winner = winner;
-      state.status = "finished";
-      state.moveDeadline = null;
-      state.reconnectDeadline = null;
+      const meta = (state as unknown as Record<string, unknown>)._meta as
+        | { roomCode: string; mode: GameMode; isInvite: boolean }
+        | undefined;
+      if (meta && meta.roomCode) {
+        releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
+      }
+      terminateMatch(state, logger);
       continue;
     }
 
     if (isBoardFull(state.board)) {
       state.winner = null;
-      state.status = "finished";
-      state.moveDeadline = null;
-      state.reconnectDeadline = null;
+      const meta = (state as unknown as Record<string, unknown>)._meta as
+        | { roomCode: string; mode: GameMode; isInvite: boolean }
+        | undefined;
+      if (meta && meta.roomCode) {
+        releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
+      }
+      terminateMatch(state, logger);
       continue;
     }
 
@@ -820,26 +921,28 @@ function matchLoop(
   maybeApplyMatchEndStats(state, nk, logger);
   dispatcher.broadcastMessage(OP_CODE_STATE, toStatePayload(state));
 
-  // Update label when state changes
-  const meta = (state as unknown as Record<string, unknown>)._meta as
-    | { roomCode: string; mode: GameMode; isInvite: boolean }
-    | undefined;
-  const label = meta
-    ? buildMatchLabel(state, meta.roomCode, meta.mode, meta.isInvite)
-    : JSON.stringify({ status: state.status, connectedPlayers: countConnectedPlayers(state) });
+  const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
+  const label = buildLabelFromMeta(state, meta);
 
   return { state: state, label: label };
 }
 
 function matchTerminate(
   _ctx: nkruntime.Context,
-  _logger: nkruntime.Logger,
-  _nk: nkruntime.Nakama,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
   _dispatcher: nkruntime.MatchDispatcher,
   _tick: number,
   state: MatchState,
   _graceSeconds: number
 ) {
+  if (state.status !== "finished") {
+    const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
+    if (meta && meta.roomCode) {
+      releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
+    }
+    terminateMatch(state, logger);
+  }
   return { state: state };
 }
 
@@ -861,16 +964,24 @@ function createMatch(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkrun
   }
 
   let roomCode = "";
-  for (let attempt = 0; attempt < 32; attempt += 1) {
+  let attempts = 0;
+  for (attempts = 0; attempts < 32; attempts += 1) {
     const candidate = generateRoomCode();
-    if (roomAlreadyUsed(nk, candidate)) continue;
+    const used = roomAlreadyUsed(nk, candidate);
+    if (used) {
+      logger.info("Room code %s already used, trying another", candidate);
+      continue;
+    }
     roomCode = candidate;
     break;
   }
 
   if (!roomCode) {
+    logger.error("Failed to allocate room code after %d attempts", attempts);
     return JSON.stringify({ ok: false, data: null, error: "could not allocate room code" });
   }
+
+  logger.info("Allocated room code %s after %d attempts", roomCode, attempts + 1);
 
   let mode: GameMode = "classic";
   let moveTimeoutMs = DEFAULT_MOVE_TIMEOUT_MS;
@@ -890,8 +1001,11 @@ function createMatch(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkrun
     invite: "1",
     moveTimeoutMs: String(moveTimeoutMs),
   });
+  logger.info("Created match %s with room code %s", matchId, roomCode);
+  
   try {
     persistRoomMapping(nk, ctx, roomCode, matchId);
+    logger.info("Room code %s persisted to storage", roomCode);
   } catch (e) {
     logger.warn("room storage write failed: %s", String(e));
   }
@@ -975,13 +1089,14 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
     }
   }
 
-  // CRITICAL FIX: Use wider query range and filter by parsing JSON labels
-  // This avoids the bug where disconnected players count toward matchList size
-  const label = "mm_" + mode;
-  const allMatches = nk.matchList(50, true, label, 0, 2, "");
+  // FIX: Use empty string for label filter to get ALL authoritative matches
+  // Then filter by parsing JSON labels
+  const allMatches = nk.matchList(50, true, "", 0, 2, "");
 
-  // Find first match with exactly 1 connected player and waiting status
-  let openMatch: { matchId: string; label?: string } | null = null;
+  logger.info("Searching for quick play match, found %d total matches", allMatches.length);
+
+  // Find first quick play match with exactly 1 connected player and waiting status
+  let openMatch: { matchId: string; label?: string; roomCode?: string } | null = null;
   for (let i = 0; i < allMatches.length; i += 1) {
     const m = allMatches[i] as { matchId: string; label?: string };
     if (!m.label) continue;
@@ -990,11 +1105,14 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
         status?: string;
         connectedPlayers?: number;
         isOpen?: boolean;
+        isQuickPlay?: boolean;
+        mode?: string;
+        roomCode?: string;
       };
-      // CRITICAL: Only join if match is marked as open
-      // (status=waiting and has 0 or 1 connected players)
-      if (parsed.isOpen === true) {
+      // Only join quick play matches that are open
+      if (parsed.isOpen === true && parsed.isQuickPlay === true && parsed.mode === mode) {
         openMatch = m;
+        logger.info("Found open quick play match: %s with roomCode: %s", m.matchId, parsed.roomCode);
         break;
       }
     } catch (_e) {
@@ -1004,7 +1122,6 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
   }
 
   if (openMatch) {
-    logger.info("Found open match for quick play: %s", openMatch.matchId);
     return JSON.stringify({
       ok: true,
       data: { matchId: openMatch.matchId, mode: mode, created: false, roomCode: null },
@@ -1013,7 +1130,7 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
   }
 
   // No open match found - create a new one
-  logger.info("No open match found, creating new match for quick play");
+  logger.info("No open quick play match found, creating new match");
   let roomCode = "";
   for (let attempt = 0; attempt < 32; attempt += 1) {
     const candidate = generateRoomCode();
@@ -1022,6 +1139,7 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
     break;
   }
   if (!roomCode) {
+    logger.error("Failed to allocate room code for quick play");
     return JSON.stringify({ ok: false, data: null, error: "could not allocate room code" });
   }
 
@@ -1029,8 +1147,11 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
     roomCode: roomCode,
     mode: mode,
     invite: "0",
+    isQuickPlay: "1",
     moveTimeoutMs: String(moveTimeoutMs),
   });
+  logger.info("Created quick play match %s with roomCode %s", matchId, roomCode);
+  
   return JSON.stringify({
     ok: true,
     data: { matchId: matchId, mode: mode, roomCode: roomCode, created: true },
@@ -1049,8 +1170,17 @@ function matchmakerRpc(
 
 function getLeaderboardRpc(_ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, _payload: string) {
   try {
+    logger.info("Fetching leaderboard: %s", LEADERBOARD_ID);
     const list = nk.leaderboardRecordsList(LEADERBOARD_ID, [], 10);
-    const recs = list.records ? list.records : [];
+    
+    if (!list) {
+      logger.info("Leaderboard list is null, returning empty entries");
+      return JSON.stringify({ ok: true, data: { entries: [] }, error: null });
+    }
+    
+    const recs = list.records || [];
+    logger.info("Found %d leaderboard records", recs.length);
+    
     const entries: {
       username: string;
       rating: number;
@@ -1059,19 +1189,24 @@ function getLeaderboardRpc(_ctx: nkruntime.Context, logger: nkruntime.Logger, nk
       draws: number;
       rank: number;
     }[] = [];
+    
     for (let i = 0; i < recs.length; i += 1) {
       const r = recs[i];
       const ownerId = r.ownerId || r.owner_id || "";
       const st = ownerId ? getStats(nk, ownerId) : null;
+      const username = r.username || "player";
+      const rating = Number(r.score) || DEFAULT_RATING;
+      
       entries.push({
-        username: r.username ? r.username : "player",
-        rating: Number(r.score),
+        username: username,
+        rating: rating,
         wins: st ? st.wins : 0,
         losses: st ? st.losses : 0,
         draws: st ? st.draws : 0,
         rank: i + 1,
       });
     }
+    
     return JSON.stringify({ ok: true, data: { entries: entries }, error: null });
   } catch (e) {
     logger.error("get_leaderboard failed: %s", String(e));
