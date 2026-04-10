@@ -1,6 +1,8 @@
 FROM heroiclabs/nakama:3.22.0
 
-# Copy compiled TypeScript module
-COPY build/ /nakama/data/modules/
+COPY ./build/ /nakama/data/modules/build/
 
-# Nakama will auto-load the module from /nakama/data/modules
+CMD ["nakama",
+"--name", "nakama1",
+"--database.address", "${DATABASE_ADDRESS}",
+"--logger.level", "DEBUG"]
