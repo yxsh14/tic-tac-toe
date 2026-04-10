@@ -27,6 +27,7 @@ declare namespace nkruntime {
 
   interface Match {
     matchId: string;
+    size?: number;
   }
 
   interface UserRecord {
@@ -47,11 +48,71 @@ declare namespace nkruntime {
     ): void;
   }
 
+  interface StorageWriteObject {
+    collection: string;
+    key: string;
+    userId: string;
+    value: string;
+    permissionRead?: number;
+    permissionWrite?: number;
+    version?: string;
+  }
+
+  interface StorageReadRequest {
+    collection: string;
+    key: string;
+    userId: string;
+  }
+
+  interface StorageObject {
+    collection: string;
+    key: string;
+    userId: string;
+    value: string;
+    version: string;
+  }
+
+  interface LeaderboardRecord {
+    ownerId?: string;
+    owner_id?: string;
+    username?: string;
+    score: string;
+    subscore?: string;
+    rank?: string;
+  }
+
+  interface LeaderboardRecordList {
+    records: LeaderboardRecord[];
+  }
+
   interface Nakama {
     binaryToString(data: string): string;
     matchCreate(module: string, params: Record<string, unknown>): string;
     matchGet(matchId: string): Match | null;
     accountGetId(userId: string): Account;
+    storageWrite(objects: StorageWriteObject[]): void;
+    storageRead(requests: StorageReadRequest[]): StorageObject[];
+    leaderboardCreate(
+      id: string,
+      authoritative: boolean,
+      sortOrder: string,
+      operator: string,
+      resetSchedule: string,
+      metadata: Record<string, unknown>
+    ): void;
+    leaderboardRecordWrite(
+      id: string,
+      ownerId: string,
+      username: string,
+      score: number,
+      subscore: number,
+      metadata: Record<string, unknown>
+    ): void;
+    leaderboardRecordsList(
+      id: string,
+      ownerIds: string[],
+      limit: number
+    ): LeaderboardRecordList;
     matchList(
       limit: number,
       authoritative: boolean,

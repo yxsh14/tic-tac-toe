@@ -1,14 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { MatchData } from "@heroiclabs/nakama-js";
 import GameScreen from "@/components/GameScreen";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OPCODES } from "@/constants/protocol";
 import { ROUTES } from "@/constants/routeConst";
+import { useMatchSession } from "@/contexts/MatchSessionContext";
 import { usePlayer } from "@/contexts/PlayerContext";
 import { useAuthoritativeMatchSocket } from "@/hooks/match/useAuthoritativeMatchSocket";
 import { useNakamaSession } from "@/hooks/nakama/useNakamaSession";
+import { resetMatchSocket } from "@/services/match/matchSocketService";
 import type { AuthoritativeMatchState } from "@/types/match";
 
 const decoder = new TextDecoder();
@@ -17,21 +29,28 @@ const GamePage = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const matchId = searchParams.get("matchId") || "";
+  const paramRoomCode = searchParams.get("roomCode") || "";
   const { player } = usePlayer();
+  const { roomCode: ctxRoomCode, setSession, setLiveState, clearSession } = useMatchSession();
 
   const [state, setState] = useState<AuthoritativeMatchState | null>(null);
   const [sendingMove, setSendingMove] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [resultOpen, setResultOpen] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
 
   const sessionQuery = useNakamaSession(player?.name);
   const socket = useAuthoritativeMatchSocket();
 
+  const roomCode = paramRoomCode || ctxRoomCode || null;
+
+  const nakamaUsername = sessionQuery.data?.username ?? player?.name ?? "";
+
   const mySymbol = useMemo(() => {
-    if (!state || !player) return null;
-    return state.players.find((p) => p.userId === player.id)?.symbol ?? null;
-  }, [state, player]);
+    if (!state || !nakamaUsername) return null;
+    return state.players.find((p) => p.username === nakamaUsername)?.symbol ?? null;
+  }, [state, nakamaUsername]);
 
   const resultMessage = useMemo(() => {
     if (!state || state.status !== "finished") return "";
@@ -39,6 +58,17 @@ const GamePage = () => {
     if (!mySymbol) return `Match finished. Winner: ${state.winner}.`;
     return state.winner === mySymbol ? "You won the match." : "You lost the match.";
   }, [state, mySymbol]);
+
+  const exitToHome = useCallback(() => {
+    console.log("[game] exitToHome: navigate first, then cleanup socket");
+    // Navigate FIRST to avoid "websocket not connected" during transition
+    navigate(ROUTES.LOBBY, { replace: true });
+    // Delay socket cleanup to ensure smooth navigation
+    setTimeout(() => {
+      resetMatchSocket();
+      clearSession();
+    }, 100);
+  }, [clearSession, navigate]);
 
   useEffect(() => {
     if (!player) {
@@ -52,6 +82,12 @@ const GamePage = () => {
   }, [player, matchId, navigate]);
 
   useEffect(() => {
+    if (matchId) {
+      setSession(matchId, roomCode);
+    }
+  }, [matchId, roomCode, setSession]);
+
+  useEffect(() => {
     if (!player || !matchId || !sessionQuery.data) return;
 
     setConnectionStatus("connecting");
@@ -59,42 +95,124 @@ const GamePage = () => {
 
     const connect = async () => {
       try {
-        await socket.connect(sessionQuery.data, matchId, {
+        await socket.connect(sessionQuery.data!, matchId, {
           onMatchData: (msg: MatchData) => {
             if (msg.op_code !== OPCODES.STATE_UPDATE) return;
             const text = decoder.decode(msg.data);
             try {
               const parsed = JSON.parse(text) as AuthoritativeMatchState;
               setState(parsed);
+              setLiveState(parsed);
               setConnectionStatus("live");
             } catch {
               setConnectionError("Invalid state payload from backend");
               setConnectionStatus("error");
             }
           },
-          onDisconnect: () => {
+          onDisconnect: (evt: Event) => {
+            console.log("[game] socket disconnected", evt);
             setConnectionStatus("error");
-            setConnectionError("Socket disconnected");
+            // Check if this was a clean close or error
+            const wasClean = (evt as CloseEvent)?.wasClean ?? false;
+            if (!wasClean) {
+              setConnectionError("Connection lost. Returning to home...");
+              // Auto-return to home after brief delay
+              setTimeout(() => {
+                resetMatchSocket();
+                clearSession();
+                navigate(ROUTES.HOME, { replace: true });
+              }, 2000);
+            } else {
+              setConnectionError("Socket disconnected");
+            }
           },
         });
       } catch (e) {
+        console.error("[game] Failed to connect:", e);
         setConnectionStatus("error");
-        setConnectionError(e instanceof Error ? e.message : "Failed to connect match socket");
+        const errorMsg = e instanceof Error ? e.message : "Failed to connect match socket";
+        setConnectionError(errorMsg);
+        // On connection failure, hard reset and go home
+        resetMatchSocket();
+        clearSession();
+        setTimeout(() => {
+          navigate(ROUTES.HOME, { replace: true });
+        }, 2000);
       }
     };
 
     void connect();
 
     return () => {
-      socket.disconnect();
+      console.log("[game] GamePage unmount: disconnect");
+      // Use hard reset on unmount to ensure clean state
+      resetMatchSocket();
+      clearSession();
     };
-  }, [player, matchId, sessionQuery.data, socket]);
+  }, [player, matchId, sessionQuery.data, socket, setLiveState, clearSession, navigate]);
 
   useEffect(() => {
     if (state?.status === "finished") {
       setResultOpen(true);
     }
   }, [state?.status]);
+
+  // Enhanced leave confirmation based on game state
+  const getLeaveConfirmation = () => {
+    if (!state) return null;
+
+    if (state.status === "playing") {
+      return {
+        title: "Leave Match?",
+        description:
+          "The game is in progress. If you leave now, you will forfeit the match and it will count as a loss.",
+        confirmText: "Leave & Forfeit",
+        isDestructive: true,
+      };
+    }
+
+    if (state.status === "waiting_reconnect") {
+      return {
+        title: "Leave Match?",
+        description:
+          "Your opponent disconnected. If you leave now, you may win by abandonment, or the match may end in a draw if both leave.",
+        confirmText: "Leave Match",
+        isDestructive: false,
+      };
+    }
+
+    if (state.status === "waiting") {
+      const hasOpponent = state.players.some((p) => p.username !== nakamaUsername);
+      if (hasOpponent) {
+        return {
+          title: "Leave Room?",
+          description: "The room will be closed and your opponent will be returned to the lobby.",
+          confirmText: "Close Room",
+          isDestructive: false,
+        };
+      }
+      return {
+        title: "Leave Room?",
+        description: "This room will be closed if you leave. You'll need to create a new room to play again.",
+        confirmText: "Close Room",
+        isDestructive: false,
+      };
+    }
+
+    // finished or other states - no confirmation needed
+    return null;
+  };
+
+  const leaveConfirmation = getLeaveConfirmation();
+  const needsLeaveConfirm = leaveConfirmation !== null;
+
+  const handleLeaveRequest = () => {
+    if (needsLeaveConfirm) {
+      setLeaveConfirmOpen(true);
+      return;
+    }
+    exitToHome();
+  };
 
   if (!player || !matchId) {
     return null;
@@ -104,7 +222,8 @@ const GamePage = () => {
     <>
       <GameScreen
         player={player}
-        matchId={matchId}
+        roomCode={roomCode}
+        myUsername={nakamaUsername}
         state={state}
         mySymbol={mySymbol}
         sendingMove={sendingMove}
@@ -121,15 +240,40 @@ const GamePage = () => {
             setSendingMove(false);
           }
         }}
-        onBackToLobby={() => navigate(ROUTES.LOBBY)}
+        onLeaveMatch={handleLeaveRequest}
       />
+
+      <AlertDialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{leaveConfirmation?.title ?? "Leave?"}</AlertDialogTitle>
+            <AlertDialogDescription>{leaveConfirmation?.description ?? ""}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setLeaveConfirmOpen(false);
+                exitToHome();
+              }}
+              className={leaveConfirmation?.isDestructive ? "bg-destructive hover:bg-destructive/90" : ""}
+            >
+              {leaveConfirmation?.confirmText ?? "Leave"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={resultOpen}
         onOpenChange={(open) => {
           setResultOpen(open);
+          // Only auto-navigate if dialog was closed AND we're still on finished state
           if (!open && state?.status === "finished") {
-            navigate(ROUTES.HOME, { replace: true });
+            // Small delay to ensure dialog closes smoothly before navigation
+            setTimeout(() => {
+              navigate(ROUTES.LOBBY, { replace: true });
+            }, 100);
           }
         }}
       >
@@ -143,7 +287,8 @@ const GamePage = () => {
               type="button"
               onClick={() => {
                 setResultOpen(false);
-                navigate(ROUTES.HOME, { replace: true });
+                // Navigate first, then cleanup socket
+                navigate(ROUTES.LOBBY, { replace: true });
               }}
             >
               Go to Dashboard

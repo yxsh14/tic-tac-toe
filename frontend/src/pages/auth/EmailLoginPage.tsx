@@ -68,7 +68,7 @@ const EmailLoginPage = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                placeholder="••••••••"
+                placeholder="Password"
                 className="border-2 border-[hsl(var(--tetris-cyan))] bg-background/60"
                 autoComplete="current-password"
               />
@@ -80,7 +80,7 @@ const EmailLoginPage = () => {
               disabled={pending}
               className="flex-1 bg-primary font-bold text-primary-foreground"
             >
-              {pending ? "…" : "? LOGIN"}
+              {pending ? "ï¿½" : "? LOGIN"}
             </Button>
             <Button asChild variant="outline" className="border-2 border-border">
               <Link to={ROUTES.AUTH}>BACK</Link>

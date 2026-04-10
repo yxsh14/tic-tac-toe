@@ -13,6 +13,27 @@ let joinedMatchId: string | null = null;
 let activeHandlers: MatchSocketHandlers = {};
 let lastMatchDataLogAt = 0;
 
+/** Hard reset - creates a fresh socket instance. Call this when leaving matches or on errors. */
+export function resetMatchSocket(): void {
+  try {
+    if (singletonSocket && isConnected && joinedMatchId) {
+      void singletonSocket.leaveMatch(joinedMatchId);
+    }
+    if (singletonSocket && isConnected) {
+      singletonSocket.disconnect(true);
+    }
+  } catch {
+    /* ignore */
+  } finally {
+    singletonSocket = null;
+    isConnected = false;
+    joinedMatchId = null;
+    activeHandlers = {};
+    lastMatchDataLogAt = 0;
+    console.log("[socket] hard reset complete");
+  }
+}
+
 function getOrCreateSocket(): Socket {
   if (singletonSocket) return singletonSocket;
   const client = getNakamaClient();
@@ -51,6 +72,9 @@ export async function connectAuthoritativeMatch(
   matchId: string,
   handlers: MatchSocketHandlers = {}
 ): Promise<{ socket: Socket; disconnect: () => void }> {
+  // CRITICAL: Always reset socket before connecting to ensure clean state
+  resetMatchSocket();
+
   const socket = getOrCreateSocket();
   activeHandlers = handlers;
   attachSafeHandlers(socket);
@@ -62,6 +86,16 @@ export async function connectAuthoritativeMatch(
     console.log("[socket] connected");
   }
 
+  if (joinedMatchId && joinedMatchId !== matchId) {
+    console.log("[socket] leaving previous match before join", { previous: joinedMatchId, next: matchId });
+    try {
+      await singletonSocket.leaveMatch(joinedMatchId);
+    } catch (e) {
+      console.warn("[socket] leaveMatch previous failed", e);
+    }
+    joinedMatchId = null;
+  }
+
   if (joinedMatchId !== matchId) {
     console.log("[socket] joining match", { matchId });
     await socket.joinMatch(matchId, undefined, {});
@@ -70,20 +104,10 @@ export async function connectAuthoritativeMatch(
   }
 
   const disconnect = () => {
-    try {
-      if (singletonSocket && isConnected) {
-        console.log("[socket] disconnect requested");
-        singletonSocket.disconnect(true);
-      }
-    } catch {
-      /* ignore */
-    } finally {
-      isConnected = false;
-      joinedMatchId = null;
-      activeHandlers = {};
-      lastMatchDataLogAt = 0;
-    }
+    console.log("[socket] disconnect requested");
+    resetMatchSocket();
   };
 
   return { socket, disconnect };
 }
+

@@ -1,14 +1,13 @@
 /**
- * Nakama RPC ids registered in `nakama/modules/index.ts`.
+ * Nakama RPC ids registered in `nakama/modules/runtime.ts`.
  */
 export const RPC_IDS = {
   CREATE_MATCH: "create_match",
-  JOIN_MATCH: "join_match",
+  JOIN_MATCH_BY_CODE: "join_match_by_code",
+  FIND_MATCH: "find_match",
+  GET_LEADERBOARD: "get_leaderboard",
+  GET_PROFILE: "get_profile",
   MATCHMAKER: "matchmaker",
-  /** TODO: implement in Nakama — email signup (username + email + password). */
-  SIGNUP_EMAIL: "signup_email",
-  /** TODO: implement in Nakama — email login (or use Nakama built-in email auth). */
-  LOGIN_EMAIL: "login_email",
 } as const;
 
 /** Authoritative match module name passed to nk.matchCreate */

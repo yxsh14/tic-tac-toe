@@ -6,6 +6,7 @@ import {
   ensureDeviceSession,
   saveSession,
 } from "@/services/nakama/sessionService";
+import { resetMatchSocket } from "@/services/match/matchSocketService";
 
 export interface EmailAuthInput {
   email: string;
@@ -40,6 +41,7 @@ export async function loginAsGuest(displayName: string): Promise<Session> {
 }
 
 export function logoutFromFrontend(): void {
+  resetMatchSocket();
   clearStoredSession();
   clearLocalDeviceId();
 }

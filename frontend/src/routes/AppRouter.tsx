@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { REDIRECT_ROUTES, ROUTES, SEG } from "@/constants/routeConst";
+import { ProtectedRoute } from "@/routes/ProtectedRoute";
 import AuthLayout from "@/pages/auth/AuthLayout";
 import AuthSelectPage from "@/pages/auth/AuthSelectPage";
 import EmailLoginPage from "@/pages/auth/EmailLoginPage";
@@ -26,8 +27,22 @@ export function AppRouter() {
           <Route path={`${SEG.EMAIL}/${SEG.SIGNUP}`} element={<EmailSignupPage />} />
         </Route>
 
-        <Route path={ROUTES.LOBBY} element={<LobbyPage />} />
-        <Route path={ROUTES.GAME} element={<GamePage />} />
+        <Route
+          path={ROUTES.LOBBY}
+          element={
+            <ProtectedRoute>
+              <LobbyPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path={ROUTES.GAME}
+          element={
+            <ProtectedRoute>
+              <GamePage />
+            </ProtectedRoute>
+          }
+        />
         <Route path={ROUTES.LEGACY_INDEX} element={<Navigate to={REDIRECT_ROUTES.HOME} replace />} />
         <Route path={ROUTES.NOT_FOUND} element={<NotFoundPage />} />
       </Routes>
