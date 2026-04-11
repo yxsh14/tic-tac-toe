@@ -6,7 +6,6 @@ const NotFoundPage = () => {
   const location = useLocation();
 
   useEffect(() => {
-    console.error("404: attempted route:", location.pathname);
   }, [location.pathname]);
 
   return (

@@ -306,74 +306,12 @@ function normalizeRoomCode(raw: string): string {
 }
 
 function roomAlreadyUsed(nk: nkruntime.Nakama, roomCode: string): boolean {
-  // PRIMARY: Check storage-based tracking for active room codes
-  // This is the authoritative source for room code availability
-  try {
-    const activeCodes = nk.storageRead([
-      { collection: STORAGE_COLLECTION_ROOM_CODES, key: roomCode, userId: SYSTEM_USER_ID },
-    ]);
-    if (activeCodes && activeCodes.length > 0 && activeCodes[0].value) {
-      try {
-        const parsed = JSON.parse(activeCodes[0].value);
-        // If we have a matchId in storage, the code is active
-        if (parsed && parsed.matchId) {
-          return true;
-        }
-      } catch {
-        // If can't parse, assume it's stale - safe to reuse
-      }
-    }
-  } catch {
-    // Storage read failed - log but continue to be resilient
-  }
-  
-  // Storage shows code is available, safe to use
+  // REMOVED: Storage-based room code checking
+  // Storage is not suitable for real-time matchmaking
+  // Room codes are now managed via match labels only
   return false;
 }
 
-function persistRoomMapping(
-  nk: nkruntime.Nakama,
-  ctx: nkruntime.Context,
-  roomCode: string,
-  matchId: string
-): void {
-  if (!ctx.userId) return;
-  
-  const roomData = {
-    matchId: matchId,
-    roomCode: roomCode,
-    createdAt: Date.now(),
-    createdBy: ctx.userId,
-    status: "active"
-  };
-  
-  // Write room mapping under creator's userId (for room lookup by user)
-  nk.storageWrite([
-    {
-      collection: STORAGE_COLLECTION_ROOMS,
-      key: roomCode,
-      userId: ctx.userId,
-      value: JSON.stringify(roomData),
-      permissionRead: 2,
-      permissionWrite: 0,
-      version: "",
-    },
-  ]);
-  
-  // Write to system tracking collection (for room code uniqueness check)
-  // Use empty version "" for upsert behavior
-  nk.storageWrite([
-    {
-      collection: STORAGE_COLLECTION_ROOM_CODES,
-      key: roomCode,
-      userId: SYSTEM_USER_ID,
-      value: JSON.stringify({ matchId: matchId, createdAt: Date.now() }),
-      permissionRead: 2,
-      permissionWrite: 0,
-      version: "",
-    },
-  ]);
-}
 
 function terminateMatch(
   state: MatchState,
@@ -388,48 +326,6 @@ function terminateMatch(
   state.status = "finished";
   state.moveDeadline = null;
   state.reconnectDeadline = null;
-}
-
-function releaseRoomCodeFromStorage(nk: nkruntime.Nakama, roomCode: string, logger: nkruntime.Logger): void {
-  try {
-    nk.storageWrite([
-      {
-        collection: STORAGE_COLLECTION_ROOM_CODES,
-        key: roomCode,
-        userId: SYSTEM_USER_ID,
-        value: JSON.stringify({ matchId: null, releasedAt: Date.now() }),
-        permissionRead: 2,
-        permissionWrite: 0,
-        version: "",
-      },
-    ]);
-    logger.info("Room code %s released from storage", roomCode);
-  } catch (e) {
-    logger.error("Failed to release room code %s: %s", roomCode, String(e));
-  }
-}
-
-function findMatchIdByRoomCode(nk: nkruntime.Nakama, roomCode: string): string | null {
-  // PRIMARY: Check storage for active room code mapping
-  // This is the authoritative source
-  try {
-    const activeCodes = nk.storageRead([
-      { collection: STORAGE_COLLECTION_ROOM_CODES, key: roomCode, userId: SYSTEM_USER_ID },
-    ]);
-    if (activeCodes && activeCodes.length > 0 && activeCodes[0].value) {
-      try {
-        const parsed = JSON.parse(activeCodes[0].value);
-        if (parsed && parsed.matchId) {
-          return parsed.matchId;
-        }
-      } catch {
-        // Storage parse failed
-      }
-    }
-  } catch {
-    // Storage read failed
-  }
-  return null;
 }
 
 function getPlayerByUserId(state: MatchState, userId: string): MatchPlayer | null {
@@ -531,28 +427,29 @@ function countConnectedPlayers(state: MatchState): number {
 }
 
 function buildMatchLabel(state: MatchState, roomCode: string, mode: GameMode, isInvite: boolean): string {
-  const connected = countConnectedPlayers(state);
+  const players = state.players.length;
   const payload = {
-    status: state.status,
-    connectedPlayers: connected,
     roomCode: roomCode,
+    status: state.status,
     mode: mode,
     isInvite: isInvite,
-    isOpen: state.status === "waiting" && connected === 1,
+    isQuickPlay: false,
+    players: players,
+    isOpen: state.status === "waiting" && players < 2,
   };
   return JSON.stringify(payload);
 }
 
 function buildQuickPlayLabel(state: MatchState, roomCode: string, mode: GameMode): string {
-  const connected = countConnectedPlayers(state);
+  const players = state.players.length;
   const payload = {
-    status: state.status,
-    connectedPlayers: connected,
     roomCode: roomCode,
+    status: state.status,
     mode: mode,
     isInvite: false,
     isQuickPlay: true,
-    isOpen: state.status === "waiting" && connected === 1,
+    players: players,
+    isOpen: state.status === "waiting" && players < 2,
   };
   return JSON.stringify(payload);
 }
@@ -779,13 +676,10 @@ function matchLeave(
 
   const connectedPlayers = countConnectedPlayers(state);
 
-  // CRITICAL: Auto-cleanup empty waiting matches
-  if (state.status === "waiting" && connectedPlayers === 0 && state.movesCount === 0) {
+  // Auto-terminate empty waiting matches to prevent room code exhaustion
+  if (state.status === "waiting" && connectedPlayers === 0) {
     logger.info("Auto-terminating empty waiting match");
     const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
-    if (meta && meta.roomCode) {
-      releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
-    }
     terminateMatch(state, logger);
     const label = buildLabelFromMeta(state, meta);
     return { state: state, label: label };
@@ -895,9 +789,6 @@ function matchLoop(
       const meta = (state as unknown as Record<string, unknown>)._meta as
         | { roomCode: string; mode: GameMode; isInvite: boolean }
         | undefined;
-      if (meta && meta.roomCode) {
-        releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
-      }
       terminateMatch(state, logger);
       continue;
     }
@@ -907,9 +798,6 @@ function matchLoop(
       const meta = (state as unknown as Record<string, unknown>)._meta as
         | { roomCode: string; mode: GameMode; isInvite: boolean }
         | undefined;
-      if (meta && meta.roomCode) {
-        releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
-      }
       terminateMatch(state, logger);
       continue;
     }
@@ -938,9 +826,6 @@ function matchTerminate(
 ) {
   if (state.status !== "finished") {
     const meta = (state as unknown as Record<string, unknown>)._meta as MatchMeta | undefined;
-    if (meta && meta.roomCode) {
-      releaseRoomCodeFromStorage(nk, meta.roomCode, logger);
-    }
     terminateMatch(state, logger);
   }
   return { state: state };
@@ -1002,13 +887,6 @@ function createMatch(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkrun
     moveTimeoutMs: String(moveTimeoutMs),
   });
   logger.info("Created match %s with room code %s", matchId, roomCode);
-  
-  try {
-    persistRoomMapping(nk, ctx, roomCode, matchId);
-    logger.info("Room code %s persisted to storage", roomCode);
-  } catch (e) {
-    logger.warn("room storage write failed: %s", String(e));
-  }
 
   const response: RpcEnvelope<{ roomCode: string; matchId: string; mode: GameMode; moveTimeoutMs: number }> = {
     ok: true,
@@ -1018,7 +896,7 @@ function createMatch(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkrun
   return JSON.stringify(response);
 }
 
-function joinMatchByCode(ctx: nkruntime.Context, _logger: nkruntime.Logger, nk: nkruntime.Nakama, payload: string) {
+function joinMatchByCode(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, payload: string) {
   if (!ctx.userId) {
     return JSON.stringify({ ok: false, data: null, error: "unauthorized" });
   }
@@ -1038,36 +916,40 @@ function joinMatchByCode(ctx: nkruntime.Context, _logger: nkruntime.Logger, nk: 
     return JSON.stringify({ ok: false, data: null, error: "invalid room code" });
   }
 
-  const matchId = findMatchIdByRoomCode(nk, roomCode);
-  if (!matchId) {
-    return JSON.stringify({ ok: false, data: null, error: "room not found" });
-  }
+  // Use label-based filtering to find match by room code
+  const allMatches = nk.matchList(50, true, "", 0, 2, "");
+  logger.info("Searching for room code %s, found %d total matches", roomCode, allMatches.length);
 
-  const matches = nk.matchList(20, true, roomCode, 0, MAX_PLAYERS + 1, "");
-  let target: { matchId: string; size?: number } | null = null;
-  for (let i = 0; i < matches.length; i += 1) {
-    const m = matches[i] as { matchId: string; size?: number };
-    if (m.matchId === matchId) {
-      target = m;
-      break;
+  let targetMatch: { matchId: string; label?: string } | null = null;
+  for (let i = 0; i < allMatches.length; i += 1) {
+    const m = allMatches[i] as { matchId: string; label?: string };
+    if (!m.label) continue;
+
+    try {
+      const parsed = JSON.parse(m.label) as {
+        roomCode?: string;
+        status?: string;
+        players?: number;
+        isQuickPlay?: boolean;
+      };
+      if (parsed.roomCode === roomCode && parsed.status === "waiting" && parsed.players !== undefined && parsed.players < 2) {
+        targetMatch = m;
+        logger.info("Found match for room code %s: %s with %d players", roomCode, m.matchId, parsed.players);
+        break;
+      }
+    } catch (_e) {
+      // Skip matches with invalid JSON labels
+      continue;
     }
   }
 
-  if (!target && matches.length > 0) {
-    target = matches[0] as { matchId: string; size?: number };
-  }
-
-  if (!target) {
+  if (!targetMatch) {
     return JSON.stringify({ ok: false, data: null, error: "room not found" });
-  }
-
-  if (typeof target.size === "number" && target.size >= MAX_PLAYERS) {
-    return JSON.stringify({ ok: false, data: null, error: "room is full" });
   }
 
   return JSON.stringify({
     ok: true,
-    data: { matchId: target.matchId, roomCode: roomCode },
+    data: { matchId: targetMatch.matchId, roomCode: roomCode },
     error: null,
   });
 }
@@ -1089,30 +971,37 @@ function findMatchRpc(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkru
     }
   }
 
-  // FIX: Use empty string for label filter to get ALL authoritative matches
-  // Then filter by parsing JSON labels
+  // Get all authoritative matches and filter by label
   const allMatches = nk.matchList(50, true, "", 0, 2, "");
 
   logger.info("Searching for quick play match, found %d total matches", allMatches.length);
 
-  // Find first quick play match with exactly 1 connected player and waiting status
+  // Find first quick play match that is open and has < 2 players
   let openMatch: { matchId: string; label?: string; roomCode?: string } | null = null;
   for (let i = 0; i < allMatches.length; i += 1) {
     const m = allMatches[i] as { matchId: string; label?: string };
     if (!m.label) continue;
+
     try {
       const parsed = JSON.parse(m.label) as {
         status?: string;
-        connectedPlayers?: number;
+        players?: number;
         isOpen?: boolean;
         isQuickPlay?: boolean;
         mode?: string;
         roomCode?: string;
       };
-      // Only join quick play matches that are open
-      if (parsed.isOpen === true && parsed.isQuickPlay === true && parsed.mode === mode) {
+
+      // Filter: must be open, quick play, same mode, and < 2 players
+      if (
+        parsed.isOpen === true &&
+        parsed.isQuickPlay === true &&
+        parsed.mode === mode &&
+        parsed.players !== undefined &&
+        parsed.players < 2
+      ) {
         openMatch = m;
-        logger.info("Found open quick play match: %s with roomCode: %s", m.matchId, parsed.roomCode);
+        logger.info("Found open quick play match: %s with roomCode: %s, players: %d", m.matchId, parsed.roomCode, parsed.players);
         break;
       }
     } catch (_e) {
