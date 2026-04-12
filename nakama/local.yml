@@ -9,3 +9,8 @@ socket:
 
 runtime:
   js_entrypoint: "build/index.js"
+
+# CORS configuration - allow specific frontend domain
+cors:
+  allow_origins:
+    - "https://tic-tac-toe-lila-assign-35.vercel.app"
